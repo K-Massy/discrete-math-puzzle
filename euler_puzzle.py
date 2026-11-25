@@ -8,8 +8,8 @@ import pygame
 pygame.init()
 SCREEN_WIDTH, SCREEN_HEIGHT = 700, 520
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-pygame.display.set_caption("Eulerian Path Puzzle - Procedural Generation")
-font_ui = pygame.font.SysFont(None, 30)
+pygame.display.set_caption("Eulerian Path Puzzle - Step 2: Strict Retry")
+font_ui = pygame.font.SysFont(None, 28)
 font_node = pygame.font.SysFont(None, 26)
 
 
@@ -47,9 +47,7 @@ def is_layout_clean(nodes_pos, edges_set):
 def build_polygon_layout(num_nodes, edges_set):
     """多角形（円周）ベースで見やすく重なりのない座標を高速生成する"""
     cx, cy = SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 15
-    rx, ry = 230, 175  # 画面比率に合わせた楕円半径
-
-    # 頂点数が6以上のときは「外周(N-1個) + 中心(1個)」のホイール配置も候補にする
+    rx, ry = 230, 175
     use_center = num_nodes >= 6 and (num_nodes % 2 == 0)
 
     for _ in range(30):
@@ -60,7 +58,6 @@ def build_polygon_layout(num_nodes, edges_set):
         if use_center:
             outer_nodes = order[:-1]
             center_node = order[-1]
-            # 中心点はわずかにずらして対称線上の重なりを防ぐ
             nodes_pos[center_node] = (
                 cx + random.randint(-18, 18),
                 cy + random.randint(-15, 15),
@@ -86,7 +83,6 @@ def build_polygon_layout(num_nodes, edges_set):
         if is_layout_clean(nodes_pos, edges_set):
             return nodes_pos
 
-    # 万が一すべての試行で重なった場合は、完全な正多角形で配置（100%重なりなし）
     nodes_pos = {}
     step = (2 * math.pi) / num_nodes
     for i in range(num_nodes):
@@ -100,7 +96,6 @@ def build_polygon_layout(num_nodes, edges_set):
 
 # --- 2. 離散数学による「美しい一筆書きグラフ」の高速自動生成 ---
 def generate_eulerian_stage(level):
-    # 頂点数は 5〜8 の範囲で段階的に増加（パズルとして見やすい上限に設定）
     num_nodes = min(5 + (level - 1) // 3, 8)
     prob = min(0.50 + (level * 0.015), 0.65)
 
@@ -111,7 +106,6 @@ def generate_eulerian_stage(level):
         if not nx.is_connected(G):
             continue
 
-        # 奇数次数の頂点をペアにして辺を調整し、オイラー路の条件を満たす
         odd_nodes = [v for v, d in G.degree() if d % 2 == 1]
         random.shuffle(odd_nodes)
         while len(odd_nodes) > 2:
@@ -126,16 +120,11 @@ def generate_eulerian_stage(level):
             continue
 
         degrees = [d for _, d in G.degree()]
-        min_deg = min(degrees)
-        deg2_count = sum(1 for d in degrees if d == 2)
-
-        # 条件1: 次数1（行き止まりの一本道）を禁止
-        if min_deg < 2:
+        if min(degrees) < 2:
             continue
 
-        # 条件2: 次数2（単なる折れ線）を最大1個までに制限（試行回数が多い場合は緩和）
         max_deg2 = 1 if attempts < 200 else 2
-        if deg2_count > max_deg2:
+        if sum(1 for d in degrees if d == 2) > max_deg2:
             continue
 
         edges_set = {normalize_edge(u, v) for u, v in G.edges()}
@@ -143,16 +132,50 @@ def generate_eulerian_stage(level):
         return nodes_pos, edges_set
 
 
-# --- 3. ゲーム状態管理 ---
+# --- 3. ヒント計算ロジック ---
+def compute_hint(current_node, visited):
+    """現在の盤面から『次に選ぶべき頂点』と『次に通るべき辺』を計算する。"""
+    remaining_edges = [e for e in ALL_EDGES_SET if e not in visited]
+    if not remaining_edges:
+        return None, None, True
+
+    rem_G = nx.Graph()
+    rem_G.add_edges_from(remaining_edges)
+
+    if not nx.is_connected(rem_G):
+        return None, None, False
+
+    odd_nodes = [v for v, d in rem_G.degree() if d % 2 == 1]
+
+    if current_node is None:
+        start_node = odd_nodes[0] if odd_nodes else next(iter(rem_G.nodes()))
+        path = list(nx.eulerian_path(rem_G, source=start_node))
+        first_u, first_v = path[0]
+        return first_u, normalize_edge(first_u, first_v), True
+    else:
+        if current_node not in rem_G:
+            return None, None, False
+        if len(odd_nodes) == 0 or (
+                len(odd_nodes) == 2 and current_node in odd_nodes
+        ):
+            path = list(nx.eulerian_path(rem_G, source=current_node))
+            next_u, next_v = path[0]
+            return next_v, normalize_edge(next_u, next_v), True
+        return None, None, False
+
+
+# --- 4. ゲーム状態管理 ---
 level = 1
 NODES, ALL_EDGES_SET = generate_eulerian_stage(level)
 
 
 def reset_play_state():
-    return [], set(), "PLAYING"
+    return [], set(), "PLAYING", None, None, ""
 
 
-path_history, visited_edges, game_state = reset_play_state()
+path_history, visited_edges, game_state, hint_node, hint_edge, hint_msg = (
+    reset_play_state()
+)
 
 
 def get_remaining_degree(node_id, visited):
@@ -171,7 +194,7 @@ def check_game_state(current_node, visited):
     return "PLAYING"
 
 
-# --- 4. メインループ ---
+# --- 5. メインループ ---
 clock = pygame.time.Clock()
 while True:
     screen.fill((30, 30, 40))
@@ -183,43 +206,78 @@ while True:
             sys.exit()
 
         if event.type == pygame.KEYDOWN:
+            # [R] リトライ：どの状態でも常に有効
             if event.key == pygame.K_r:
-                path_history, visited_edges, game_state = reset_play_state()
+                (
+                    path_history,
+                    visited_edges,
+                    game_state,
+                    hint_node,
+                    hint_edge,
+                    hint_msg,
+                ) = reset_play_state()
 
-            elif event.key == pygame.K_z and path_history:
+            # [Z] Undo：PLAYING状態（手詰まり前）のみ有効
+            elif event.key == pygame.K_z and game_state == "PLAYING" and path_history:
                 last_node = path_history.pop()
                 if path_history:
                     prev_node = path_history[-1]
                     visited_edges.remove(normalize_edge(prev_node, last_node))
-                new_current = path_history[-1] if path_history else None
-                game_state = check_game_state(new_current, visited_edges)
+                hint_node, hint_edge, hint_msg = None, None, ""
 
+            # [H] ヒント：PLAYING状態のみ有効
+            elif event.key == pygame.K_h and game_state == "PLAYING":
+                h_node, h_edge, solvable = compute_hint(current_node, visited_edges)
+                if solvable:
+                    hint_node, hint_edge = h_node, h_edge
+                    hint_msg = (
+                        "HINT: Start from the highlighted node!"
+                        if current_node is None
+                        else "HINT: Follow the cyan edge!"
+                    )
+                else:
+                    hint_node, hint_edge = None, None
+                    hint_msg = "HINT: Dead end ahead! Press [Z] to Undo."
+
+            # [SPACE] 次のステージ（CLEAR時のみ） / [N] 新しいマップ（PLAYING時のみ）
             elif (event.key == pygame.K_SPACE and game_state == "CLEAR") or (
-                    event.key == pygame.K_n
+                    event.key == pygame.K_n and game_state == "PLAYING"
             ):
                 if game_state == "CLEAR":
                     level += 1
                 NODES, ALL_EDGES_SET = generate_eulerian_stage(level)
-                path_history, visited_edges, game_state = reset_play_state()
+                (
+                    path_history,
+                    visited_edges,
+                    game_state,
+                    hint_node,
+                    hint_edge,
+                    hint_msg,
+                ) = reset_play_state()
 
+        # マウスクリック：PLAYING状態のみ有効
         if event.type == pygame.MOUSEBUTTONDOWN and game_state == "PLAYING":
             mx, my = event.pos
             for node_id, (nx_pos, ny_pos) in NODES.items():
                 if math.hypot(mx - nx_pos, my - ny_pos) <= 22:
                     if current_node is None:
                         path_history.append(node_id)
+                        hint_node, hint_edge, hint_msg = None, None, ""
                     elif node_id != current_node:
                         edge = normalize_edge(current_node, node_id)
                         if edge in ALL_EDGES_SET and edge not in visited_edges:
                             visited_edges.add(edge)
                             path_history.append(node_id)
                             game_state = check_game_state(node_id, visited_edges)
+                            hint_node, hint_edge, hint_msg = None, None, ""
                     break
 
     # --- 描画処理 ---
     for u, v in ALL_EDGES_SET:
         edge = (u, v)
-        if edge in visited_edges:
+        if edge == hint_edge:
+            color, width = (0, 240, 255), 7
+        elif edge in visited_edges:
             color, width = (50, 220, 100), 6
         elif current_node in edge and game_state == "PLAYING":
             color, width = (180, 180, 210), 4
@@ -236,24 +294,32 @@ while True:
         else:
             color = (70, 180, 255)
 
+        if node_id == hint_node:
+            pygame.draw.circle(screen, (0, 240, 255), pos, 25)
+
         pygame.draw.circle(screen, color, pos, 20)
         deg_text = font_node.render(str(rem_deg), True, (255, 255, 255))
         screen.blit(deg_text, deg_text.get_rect(center=pos))
 
+    # メインUIテキスト
     if game_state == "CLEAR":
         msg = f"LEVEL {level} CLEAR!  Press [SPACE] for Next Stage"
         msg_color = (255, 255, 100)
     elif game_state == "STUCK":
-        msg = f"STUCK!  [Z]: Undo  |  [R]: Retry Level {level}"
+        msg = f"STUCK!  Press [R] to Retry Level {level}"
         msg_color = (255, 100, 100)
     else:
         msg = (
-            f"LV.{level} | Edges: {len(visited_edges)}/{len(ALL_EDGES_SET)} | [Z]:"
-            " Undo  [R]: Retry  [N]: New Map"
+            f"LV.{level} | Edges: {len(visited_edges)}/{len(ALL_EDGES_SET)} | [H]:"
+            " Hint  [Z]: Undo  [R]: Retry  [N]: New"
         )
         msg_color = (230, 230, 230)
 
-    screen.blit(font_ui.render(msg, True, msg_color), (20, 20))
+    screen.blit(font_ui.render(msg, True, msg_color), (20, 18))
+
+    if hint_msg:
+        hint_surf = font_ui.render(hint_msg, True, (0, 240, 255))
+        screen.blit(hint_surf, (20, SCREEN_HEIGHT - 40))
 
     pygame.display.flip()
     clock.tick(60)
