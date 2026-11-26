@@ -7,7 +7,10 @@ PENALTY_HINT = 150
 
 
 class PuzzleGame:
+    """ゲームの進行状態、プレイヤーの操作履歴、スコア計算を管理するクラス。"""
+
     def __init__(self, width: int = 700, height: int = 520):
+        """ゲーム全体の初期化を行い、レベル1のステージを生成する。"""
         self.width = width
         self.height = height
         self.level = 1
@@ -18,18 +21,22 @@ class PuzzleGame:
 
     @property
     def current_node(self):
+        """現在プレイヤーがいる頂点ID（未選択時はNone）を返す。"""
         return self.path_history[-1] if self.path_history else None
 
     def reset_stage_state(self):
+        """現在のステージの進行状況とヒント表示を初期状態に戻す（リトライ時にも使用）。"""
         self.path_history = []
         self.visited_edges = set()
         self.state = "PLAYING"
         self.hint_node = None
         self.hint_edge = None
         self.hint_msg = ""
+        # リトライによる無限スコア稼ぎを防ぐため、ステージ開始時のスコアに戻す
         self.score = self.stage_start_score
 
     def next_stage(self, advance_level: bool = True):
+        """新しいグラフを生成して次のステージへ移行する。"""
         if advance_level:
             self.level += 1
         self.stage_start_score = self.score
@@ -37,11 +44,13 @@ class PuzzleGame:
         self.reset_stage_state()
 
     def _clear_hint(self):
+        """表示中のヒント情報（ハイライト対象とメッセージ）を消去する。"""
         self.hint_node = None
         self.hint_edge = None
         self.hint_msg = ""
 
     def select_node(self, node_id: int):
+        """クリックされた頂点に対して、始点決定または辺の移動処理を行う。"""
         if self.state != "PLAYING":
             return
 
@@ -59,6 +68,7 @@ class PuzzleGame:
                 self._update_game_state(node_id)
 
     def _update_game_state(self, current_node: int):
+        """移動後の盤面を評価し、クリア（CLEAR）または手詰まり（STUCK）へ状態を遷移させる。"""
         if len(self.visited_edges) == len(self.graph.edges_set):
             self.state = "CLEAR"
             self.score += SCORE_CLEAR_BASE * self.level
@@ -66,6 +76,7 @@ class PuzzleGame:
             self.state = "STUCK"
 
     def undo(self):
+        """直前の1手を巻き戻す。辺を戻した場合はペナルティとして減点する。"""
         if self.state != "PLAYING" or not self.path_history:
             return
 
@@ -77,6 +88,7 @@ class PuzzleGame:
         self._clear_hint()
 
     def request_hint(self):
+        """残余グラフから次の1手を解析してヒントを設定する（初回表示時のみ減点）。"""
         if self.state != "PLAYING":
             return
 
